@@ -1,4 +1,4 @@
-# --- Enhanced bot.py with Fixed Login System ---
+# --- Enhanced bot.py with Fixed Login System and Improved Download Features ---
 
 import os
 import logging
@@ -110,7 +110,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Commands:\n"
             "• Send any Telegram message link to download\n"
             "• /logout - Log out from your account\n"
-            "• /status - Check your login status"
+            "• /status - Check your login status\n"
+            "• /check @channel - Check access to a channel\n"
+            "• /channels - View your joined channels"
         )
         return ConversationHandler.END
     
@@ -255,7 +257,9 @@ async def get_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• The bot will fetch and forward the content to you\n\n"
             "📝 **Commands:**\n"
             "• /logout - Log out from your account\n"
-            "• /status - Check your login status",
+            "• /status - Check your login status\n"
+            "• /check @channel - Check access to a channel\n"
+            "• /channels - View your joined channels",
             parse_mode='Markdown'
         )
         
@@ -349,7 +353,9 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• The bot will fetch and forward the content to you\n\n"
             "📝 **Commands:**\n"
             "• /logout - Log out from your account\n"
-            "• /status - Check your login status",
+            "• /status - Check your login status\n"
+            "• /check @channel - Check access to a channel\n"
+            "• /channels - View your joined channels",
             parse_mode='Markdown'
         )
         
@@ -408,7 +414,9 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎯 **Available Commands:**\n"
             f"• Send message links to download\n"
             f"• /logout - Log out from account\n"
-            f"• /status - Check this status",
+            f"• /status - Check this status\n"
+            f"• /check @channel - Check channel access\n"
+            f"• /channels - View your channels",
             parse_mode='Markdown'
         )
     else:
@@ -454,8 +462,154 @@ async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Use /start to login with your Telegram account."
         )
 
+async def check_access_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check if user has access to a specific channel"""
+    user_id = update.effective_user.id
+    
+    if user_id not in user_sessions:
+        await update.message.reply_text(
+            "🔐 **Authentication Required**\n\n"
+            "You need to login first to use this command.\n"
+            "Use /start to begin the login process."
+        )
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "🔍 **Check Channel Access**\n\n"
+            "Usage: `/check @channelname` or `/check channel_id`\n\n"
+            "Examples:\n"
+            "• `/check @example_channel`\n"
+            "• `/check -1001234567890`\n\n"
+            "This will tell you if you have access to download from that channel."
+        )
+        return
+    
+    channel_identifier = context.args[0]
+    session_string = user_sessions[user_id]
+    
+    try:
+        user_client = Client(
+            name=f"check_{user_id}",
+            session_string=session_string,
+            api_id=API_ID,
+            api_hash=API_HASH
+        )
+        
+        async with user_client:
+            try:
+                chat_info = await user_client.get_chat(channel_identifier)
+                member_info = await user_client.get_chat_member(channel_identifier, "me")
+                
+                status_emoji = {
+                    "owner": "👑",
+                    "administrator": "🛡️", 
+                    "member": "✅",
+                    "restricted": "⚠️",
+                    "left": "❌",
+                    "banned": "🚫"
+                }.get(str(member_info.status), "❓")
+                
+                response = (
+                    f"🔍 **Channel Access Check**\n\n"
+                    f"📺 **Channel:** {chat_info.title}\n"
+                    f"🆔 **ID:** `{chat_info.id}`\n"
+                    f"👥 **Type:** {chat_info.type}\n"
+                    f"{status_emoji} **Your Status:** {member_info.status}\n\n"
+                )
+                
+                if str(member_info.status) in ["member", "administrator", "owner"]:
+                    response += "✅ **You can download from this channel!**"
+                else:
+                    response += "❌ **You cannot download from this channel.**\n\nYou need to join the channel first."
+                    
+                await update.message.reply_text(response)
+                
+            except Exception as e:
+                await update.message.reply_text(
+                    f"❌ **Cannot access channel**\n\n"
+                    f"**Channel:** `{channel_identifier}`\n"
+                    f"**Error:** {str(e)}\n\n"
+                    "This usually means:\n"
+                    "• Channel doesn't exist\n"
+                    "• You don't have access\n"
+                    "• Invalid channel identifier"
+                )
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ **Error checking access**\n\n"
+            f"**Error:** {str(e)}"
+        )
+
+async def my_channels_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user's joined channels"""
+    user_id = update.effective_user.id
+    
+    if user_id not in user_sessions:
+        await update.message.reply_text(
+            "🔐 **Authentication Required**\n\n"
+            "You need to login first to use this command.\n"
+            "Use /start to begin the login process."
+        )
+        return
+    
+    session_string = user_sessions[user_id]
+    
+    try:
+        user_client = Client(
+            name=f"channels_{user_id}",
+            session_string=session_string,
+            api_id=API_ID,
+            api_hash=API_HASH
+        )
+        
+        await update.message.reply_text("🔍 **Fetching your channels...**")
+        
+        async with user_client:
+            channels = []
+            async for dialog in user_client.get_dialogs():
+                if dialog.chat.type in ["channel", "supergroup"]:
+                    channels.append({
+                        'title': dialog.chat.title,
+                        'username': dialog.chat.username,
+                        'id': dialog.chat.id,
+                        'type': dialog.chat.type
+                    })
+            
+            if not channels:
+                await update.message.reply_text(
+                    "📭 **No channels found**\n\n"
+                    "You are not a member of any channels or supergroups."
+                )
+                return
+            
+            # Sort channels by title
+            channels.sort(key=lambda x: x['title'].lower())
+            
+            # Create response with first 20 channels (to avoid message length limit)
+            response = f"📺 **Your Channels ({len(channels)} total)**\n\n"
+            
+            for i, channel in enumerate(channels[:20], 1):
+                username_text = f"@{channel['username']}" if channel['username'] else "Private"
+                response += f"{i}. **{channel['title']}**\n"
+                response += f"   🔗 {username_text}\n"
+                response += f"   🆔 `{channel['id']}`\n\n"
+            
+            if len(channels) > 20:
+                response += f"*... and {len(channels) - 20} more channels*\n\n"
+            
+            response += "💡 **Tip:** You can download from any of these channels!"
+            
+            await update.message.reply_text(response)
+            
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ **Error fetching channels**\n\n"
+            f"**Error:** {str(e)}"
+        )
+
 async def handle_message_with_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle Telegram message links"""
+    """Enhanced handler for Telegram message links with better private channel support"""
     user_id = update.effective_user.id
     
     if user_id not in user_sessions:
@@ -548,12 +702,12 @@ async def handle_message_with_link(update: Update, context: ContextTypes.DEFAULT
             )
             return
             
-        await progress_msg.edit_text("⏳ Fetching message...")
+        await progress_msg.edit_text("⏳ Connecting to Telegram...")
         
         # Get user session
         session_string = user_sessions[user_id]
         
-        # Create temporary client
+        # Create temporary client with better error handling
         user_client = Client(
             name=f"temp_{user_id}",
             session_string=session_string,
@@ -563,96 +717,218 @@ async def handle_message_with_link(update: Update, context: ContextTypes.DEFAULT
         
         async with user_client:
             try:
-                # First try to get chat info to verify access
-                if isinstance(chat_id, str) and chat_id.startswith('@'):
-                    # For public channels, try to get chat first
-                    chat_info = await user_client.get_chat(chat_id)
-                    logger.info(f"Accessing chat: {chat_info.title}")
+                await progress_msg.edit_text("⏳ Checking channel access...")
                 
-                # Try to copy the message
-                await user_client.copy_message(
-                    chat_id=update.effective_chat.id,
-                    from_chat_id=chat_id,
-                    message_id=msg_id
-                )
-                
-                # Delete progress message and log success
-                await progress_msg.delete()
-                
-                # Log successful download
-                log_message = (
-                    f"📥 **#Download**\n\n"
-                    f"👤 **User:** {update.effective_user.full_name}\n"
-                    f"🆔 **User ID:** `{user_id}`\n"
-                    f"🔗 **Link:** `{message_text}`\n"
-                    f"💬 **Chat ID:** `{chat_id}`\n"
-                    f"📨 **Message ID:** `{msg_id}`\n"
-                    f"⏰ **Time:** {update.message.date}"
-                )
-                
-                await context.bot.send_message(
-                    chat_id=LOG_CHANNEL_ID,
-                    text=log_message,
-                    parse_mode='Markdown'
-                )
-                
-            except Exception as inner_e:
-                logger.error(f"Inner error fetching message for user {user_id}: {inner_e}")
-                
-                # Provide more specific error messages
-                error_msg = "❌ **Failed to fetch message**\n\n"
-                
-                if "peer id invalid" in str(inner_e).lower():
-                    error_msg += (
-                        "**Reason:** Invalid or inaccessible chat\n\n"
-                        "**Possible solutions:**\n"
-                        "• Make sure you have access to this channel/group\n"
-                        "• Join the channel first, then try again\n"
-                        "• Check if the channel exists and is accessible\n"
-                        "• For private channels, make sure the link is correct\n\n"
-                    )
-                elif "message not found" in str(inner_e).lower():
-                    error_msg += (
-                        "**Reason:** Message not found\n\n"
-                        "**Possible solutions:**\n"
-                        "• Message may have been deleted\n"
-                        "• Check the message ID in the link\n"
-                        "• Try a different message from the same channel\n\n"
-                    )
-                elif "flood" in str(inner_e).lower():
-                    error_msg += (
-                        "**Reason:** Rate limit hit\n\n"
-                        "**Solution:** Wait a few minutes before trying again\n\n"
-                    )
-                elif "forbidden" in str(inner_e).lower():
-                    error_msg += (
-                        "**Reason:** Access forbidden\n\n"
-                        "**Solutions:**\n"
-                        "• Join the channel/group first\n"
-                        "• Make sure you have permission to view messages\n"
-                        "• Check if the channel allows message copying\n\n"
-                    )
-                else:
-                    error_msg += (
-                        "**Possible reasons:**\n"
-                        "• No access to the channel/chat\n"
-                        "• Message not found or deleted\n"
-                        "• Network connectivity issues\n"
-                        "• Channel restrictions\n\n"
-                    )
-                
-                error_msg += f"**Technical details:** `{str(inner_e)}`"
-                
-                await progress_msg.edit_text(error_msg)
+                # First, try to get the message directly
+                try:
+                    message = await user_client.get_messages(chat_id, msg_id)
+                    if not message:
+                        raise Exception("Message not found")
+                    
+                    await progress_msg.edit_text("⏳ Downloading message...")
+                    
+                    # Try different methods to get the content
+                    success = False
+                    
+                    # Method 1: Try copying the message
+                    try:
+                        await user_client.copy_message(
+                            chat_id=update.effective_chat.id,
+                            from_chat_id=chat_id,
+                            message_id=msg_id
+                        )
+                        success = True
+                    except Exception as copy_error:
+                        logger.info(f"Copy method failed: {copy_error}")
+                    
+                    # Method 2: If copy fails, try forwarding
+                    if not success:
+                        try:
+                            await user_client.forward_messages(
+                                chat_id=update.effective_chat.id,
+                                from_chat_id=chat_id,
+                                message_ids=msg_id
+                            )
+                            success = True
+                        except Exception as forward_error:
+                            logger.info(f"Forward method failed: {forward_error}")
+                    
+                    # Method 3: If both fail, download media directly
+                    if not success and message.media:
+                        try:
+                            await progress_msg.edit_text("⏳ Downloading media...")
+                            
+                            # Download the media file
+                            file_path = await user_client.download_media(message)
+                            
+                            if file_path:
+                                # Send the downloaded file
+                                with open(file_path, 'rb') as file:
+                                    if message.photo:
+                                        await context.bot.send_photo(
+                                            chat_id=update.effective_chat.id,
+                                            photo=file,
+                                            caption=message.caption or "Downloaded from private channel"
+                                        )
+                                    elif message.video:
+                                        await context.bot.send_video(
+                                            chat_id=update.effective_chat.id,
+                                            video=file,
+                                            caption=message.caption or "Downloaded from private channel"
+                                        )
+                                    elif message.document:
+                                        await context.bot.send_document(
+                                            chat_id=update.effective_chat.id,
+                                            document=file,
+                                            caption=message.caption or "Downloaded from private channel"
+                                        )
+                                    else:
+                                        await context.bot.send_document(
+                                            chat_id=update.effective_chat.id,
+                                            document=file,
+                                            caption=message.caption or "Downloaded from private channel"
+                                        )
+                                
+                                # Clean up the downloaded file
+                                import os
+                                if os.path.exists(file_path):
+                                    os.remove(file_path)
+                                    
+                                success = True
+                        except Exception as download_error:
+                            logger.info(f"Download method failed: {download_error}")
+                    
+                    # Method 4: If all else fails, send text content
+                    if not success and message.text:
+                        await context.bot.send_message(
+                            chat_id=update.effective_chat.id,
+                            text=f"📝 **Message from private channel:**\n\n{message.text}",
+                            parse_mode='Markdown'
+                        )
+                        success = True
+                    
+                    if success:
+                        # Delete progress message and log success
+                        await progress_msg.delete()
+                        
+                        # Log successful download
+                        log_message = (
+                            f"📥 **#Download**\n\n"
+                            f"👤 **User:** {update.effective_user.full_name}\n"
+                            f"🆔 **User ID:** `{user_id}`\n"
+                            f"🔗 **Link:** `{message_text}`\n"
+                            f"💬 **Chat ID:** `{chat_id}`\n"
+                            f"📨 **Message ID:** `{msg_id}`\n"
+                            f"⏰ **Time:** {update.message.date}\n"
+                            f"🔄 **Method:** Enhanced Download"
+                        )
+                        
+                        await context.bot.send_message(
+                            chat_id=LOG_CHANNEL_ID,
+                            text=log_message,
+                            parse_mode='Markdown'
+                        )
+                    else:
+                        raise Exception("All download methods failed")
+                        
+                except Exception as message_error:
+                    # Try to get more information about the chat
+                    chat_info = None
+                    try:
+                        chat_info = await user_client.get_chat(chat_id)
+                    except:
+                        pass
+                    
+                    error_msg = "❌ **Failed to fetch message**\n\n"
+                    
+                    if "peer id invalid" in str(message_error).lower() or "invalid" in str(message_error).lower():
+                        if chat_info:
+                            error_msg += (
+                                f"**Channel:** {chat_info.title}\n"
+                                f"**Type:** {chat_info.type}\n\n"
+                                "**Possible reasons:**\n"
+                                "• This is a private channel that requires an invitation\n"
+                                "• You may have been removed from the channel\n"
+                                "• Channel access permissions have changed\n"
+                                "• Bot cannot access this specific message\n\n"
+                                "**Solutions:**\n"
+                                "• Make sure you're still a member of this channel\n"
+                                "• Try accessing the channel directly first\n"
+                                "• Ask the channel admin about access permissions\n"
+                            )
+                        else:
+                            error_msg += (
+                                "**Reason:** Cannot access this channel/chat\n\n"
+                                "**This usually happens when:**\n"
+                                "• You're not a member of this private channel\n"
+                                "• The channel doesn't exist or was deleted\n"
+                                "• You were removed from the channel\n"
+                                "• The channel requires special permissions\n\n"
+                                "**Solutions:**\n"
+                                "• Join the channel first, then try again\n"
+                                "• Check if you have access to the channel in Telegram\n"
+                                "• Ask for an invitation if it's private\n"
+                            )
+                    elif "message not found" in str(message_error).lower():
+                        error_msg += (
+                            "**Reason:** Message not found\n\n"
+                            "**Possible causes:**\n"
+                            "• Message was deleted by the sender or admin\n"
+                            "• Wrong message ID in the link\n"
+                            "• Message is restricted or hidden\n\n"
+                            "**Solutions:**\n"
+                            "• Check if the message still exists in the channel\n"
+                            "• Try a different message from the same channel\n"
+                            "• Verify the link is correct and complete\n"
+                        )
+                    elif "flood" in str(message_error).lower():
+                        error_msg += (
+                            "**Reason:** Rate limit exceeded\n\n"
+                            "**Solution:** Wait 2-5 minutes before trying again\n"
+                            "Too many requests in a short time period.\n"
+                        )
+                    elif "forbidden" in str(message_error).lower() or "restricted" in str(message_error).lower():
+                        error_msg += (
+                            "**Reason:** Access restricted\n\n"
+                            "**Possible causes:**\n"
+                            "• Channel has disabled message forwarding/copying\n"
+                            "• Your account is restricted in this channel\n"
+                            "• Channel has content protection enabled\n\n"
+                            "**Solutions:**\n"
+                            "• Contact the channel admin\n"
+                            "• Check your permissions in the channel\n"
+                            "• Try accessing the message directly in Telegram\n"
+                        )
+                    else:
+                        error_msg += (
+                            "**Possible reasons:**\n"
+                            "• Channel access restrictions\n"
+                            "• Network connectivity issues\n"
+                            "• Temporary Telegram server issues\n"
+                            "• Message or channel protection settings\n\n"
+                            "**Try:**\n"
+                            "• Wait a few minutes and try again\n"
+                            "• Check if you can access the message in Telegram app\n"
+                            "• Make sure you're connected to the internet\n"
+                        )
+                    
+                    error_msg += f"\n**Technical details:** `{str(message_error)}`"
+                    
+                    await progress_msg.edit_text(error_msg)
             
     except Exception as e:
-        logger.error(f"Error in handle_message_with_link for user {user_id}: {e}")
+        logger.error(f"Error in enhanced handle_message_with_link for user {user_id}: {e}")
         
         try:
             await progress_msg.edit_text(
-                f"❌ **Error processing link**\n\n"
+                f"❌ **Unexpected error occurred**\n\n"
                 f"**Error:** `{str(e)}`\n\n"
-                "Please check the link format and try again."
+                "**What to try:**\n"
+                "• Check your internet connection\n"
+                "• Wait a few minutes and try again\n"
+                "• Make sure the link is valid\n"
+                "• Contact support if the issue persists\n\n"
+                "**Technical details:** The bot encountered an unexpected error while processing your request."
             )
         except:
             # If progress message was already deleted or modified
@@ -736,7 +1012,8 @@ def main():
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler('logout', logout_command))
     application.add_handler(CommandHandler('status', status_command))
-    
+    application.add_handler(CommandHandler('check', check_access_command))
+    application.add_handler(CommandHandler('channels', my_channels_command))
     application.add_handler(MessageHandler(
         filters.TEXT & filters.Entity("url") & ~filters.COMMAND,
         handle_message_with_link

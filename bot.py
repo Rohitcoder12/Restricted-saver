@@ -466,93 +466,201 @@ async def handle_message_with_link(update: Update, context: ContextTypes.DEFAULT
         )
         return
     
-    message_text = update.message.text
+    message_text = update.message.text.strip()
+    
+    # Show progress
+    progress_msg = await update.message.reply_text("⏳ Analyzing link...")
     
     try:
-        # Parse Telegram link
-        parts = message_text.split('/')
+        # Parse different Telegram link formats
+        chat_id = None
+        msg_id = None
+        
         if 't.me' not in message_text:
-            await update.message.reply_text(
+            await progress_msg.edit_text(
                 "❌ This doesn't look like a Telegram link.\n\n"
                 "Please send a valid Telegram message link."
             )
             return
         
-        # Extract channel and message ID
-        if '/c/' in message_text:
-            # Private channel link: https://t.me/c/123456789/123
-            channel_id = parts[-2]
-            msg_id = int(parts[-1])
-            chat_id = int(f"-100{channel_id}")
+        # Remove any extra parameters and clean the URL
+        clean_url = message_text.split('?')[0]  # Remove URL parameters
+        parts = clean_url.split('/')
+        
+        # Handle different link formats
+        if '/c/' in clean_url:
+            # Private channel format: https://t.me/c/1234567890/123
+            try:
+                c_index = parts.index('c')
+                channel_id = parts[c_index + 1]
+                msg_id = int(parts[c_index + 2])
+                # Convert to proper chat ID format
+                chat_id = int(f"-100{channel_id}")
+                await progress_msg.edit_text("⏳ Accessing private channel...")
+            except (ValueError, IndexError):
+                await progress_msg.edit_text(
+                    "❌ Invalid private channel link format.\n\n"
+                    "Expected format: https://t.me/c/1234567890/123"
+                )
+                return
+                
+        elif '/s/' in clean_url:
+            # Story format: https://t.me/s/channelname/123  
+            try:
+                s_index = parts.index('s')
+                channel_username = parts[s_index + 1]
+                msg_id = int(parts[s_index + 2])
+                chat_id = f"@{channel_username}"
+                await progress_msg.edit_text("⏳ Accessing channel story...")
+            except (ValueError, IndexError):
+                await progress_msg.edit_text(
+                    "❌ Invalid story link format.\n\n"
+                    "Expected format: https://t.me/s/channelname/123"
+                )
+                return
+                
         else:
-            # Public channel link: https://t.me/channelname/123
-            channel_username = parts[-2]
-            msg_id = int(parts[-1])
-            chat_id = f"@{channel_username}"
-            
-    except (IndexError, ValueError):
-        await update.message.reply_text(
-            "❌ Invalid Telegram link format.\n\n"
-            "Please send a valid Telegram message link.\n\n"
-            "**Supported formats:**\n"
-            "• https://t.me/channel/123\n"
-            "• https://t.me/c/123456789/123"
-        )
-        return
-    
-    # Show progress
-    progress_msg = await update.message.reply_text("⏳ Fetching message...")
-    
-    # Get user session
-    session_string = user_sessions[user_id]
-    
-    # Create temporary client
-    user_client = Client(
-        name=f"temp_{user_id}",
-        session_string=session_string,
-        api_id=API_ID,
-        api_hash=API_HASH
-    )
-    
-    try:
-        async with user_client:
-            # Copy the message
-            await user_client.copy_message(
-                chat_id=update.effective_chat.id,
-                from_chat_id=chat_id,
-                message_id=msg_id
+            # Public channel/group format: https://t.me/channelname/123
+            try:
+                # Find the channel name and message ID
+                relevant_parts = [p for p in parts if p and p != 'https:' and p != 't.me']
+                if len(relevant_parts) >= 2:
+                    channel_username = relevant_parts[0]
+                    msg_id = int(relevant_parts[1])
+                    chat_id = f"@{channel_username}"
+                    await progress_msg.edit_text("⏳ Accessing public channel...")
+                else:
+                    raise ValueError("Not enough parts")
+            except (ValueError, IndexError):
+                await progress_msg.edit_text(
+                    "❌ Invalid public channel link format.\n\n"
+                    "Expected format: https://t.me/channelname/123"
+                )
+                return
+        
+        if not chat_id or not msg_id:
+            await progress_msg.edit_text(
+                "❌ Could not parse the Telegram link.\n\n"
+                "**Supported formats:**\n"
+                "• https://t.me/channelname/123\n"
+                "• https://t.me/c/1234567890/123\n"
+                "• https://t.me/s/channelname/123"
             )
+            return
             
-        # Delete progress message
-        await progress_msg.delete()
+        await progress_msg.edit_text("⏳ Fetching message...")
         
-        # Log successful download
-        log_message = (
-            f"📥 **#Download**\n\n"
-            f"👤 **User:** {update.effective_user.full_name}\n"
-            f"🆔 **User ID:** `{user_id}`\n"
-            f"🔗 **Link:** `{message_text}`\n"
-            f"⏰ **Time:** {update.message.date}"
+        # Get user session
+        session_string = user_sessions[user_id]
+        
+        # Create temporary client
+        user_client = Client(
+            name=f"temp_{user_id}",
+            session_string=session_string,
+            api_id=API_ID,
+            api_hash=API_HASH
         )
         
-        await context.bot.send_message(
-            chat_id=LOG_CHANNEL_ID,
-            text=log_message,
-            parse_mode='Markdown'
-        )
+        async with user_client:
+            try:
+                # First try to get chat info to verify access
+                if isinstance(chat_id, str) and chat_id.startswith('@'):
+                    # For public channels, try to get chat first
+                    chat_info = await user_client.get_chat(chat_id)
+                    logger.info(f"Accessing chat: {chat_info.title}")
+                
+                # Try to copy the message
+                await user_client.copy_message(
+                    chat_id=update.effective_chat.id,
+                    from_chat_id=chat_id,
+                    message_id=msg_id
+                )
+                
+                # Delete progress message and log success
+                await progress_msg.delete()
+                
+                # Log successful download
+                log_message = (
+                    f"📥 **#Download**\n\n"
+                    f"👤 **User:** {update.effective_user.full_name}\n"
+                    f"🆔 **User ID:** `{user_id}`\n"
+                    f"🔗 **Link:** `{message_text}`\n"
+                    f"💬 **Chat ID:** `{chat_id}`\n"
+                    f"📨 **Message ID:** `{msg_id}`\n"
+                    f"⏰ **Time:** {update.message.date}"
+                )
+                
+                await context.bot.send_message(
+                    chat_id=LOG_CHANNEL_ID,
+                    text=log_message,
+                    parse_mode='Markdown'
+                )
+                
+            except Exception as inner_e:
+                logger.error(f"Inner error fetching message for user {user_id}: {inner_e}")
+                
+                # Provide more specific error messages
+                error_msg = "❌ **Failed to fetch message**\n\n"
+                
+                if "peer id invalid" in str(inner_e).lower():
+                    error_msg += (
+                        "**Reason:** Invalid or inaccessible chat\n\n"
+                        "**Possible solutions:**\n"
+                        "• Make sure you have access to this channel/group\n"
+                        "• Join the channel first, then try again\n"
+                        "• Check if the channel exists and is accessible\n"
+                        "• For private channels, make sure the link is correct\n\n"
+                    )
+                elif "message not found" in str(inner_e).lower():
+                    error_msg += (
+                        "**Reason:** Message not found\n\n"
+                        "**Possible solutions:**\n"
+                        "• Message may have been deleted\n"
+                        "• Check the message ID in the link\n"
+                        "• Try a different message from the same channel\n\n"
+                    )
+                elif "flood" in str(inner_e).lower():
+                    error_msg += (
+                        "**Reason:** Rate limit hit\n\n"
+                        "**Solution:** Wait a few minutes before trying again\n\n"
+                    )
+                elif "forbidden" in str(inner_e).lower():
+                    error_msg += (
+                        "**Reason:** Access forbidden\n\n"
+                        "**Solutions:**\n"
+                        "• Join the channel/group first\n"
+                        "• Make sure you have permission to view messages\n"
+                        "• Check if the channel allows message copying\n\n"
+                    )
+                else:
+                    error_msg += (
+                        "**Possible reasons:**\n"
+                        "• No access to the channel/chat\n"
+                        "• Message not found or deleted\n"
+                        "• Network connectivity issues\n"
+                        "• Channel restrictions\n\n"
+                    )
+                
+                error_msg += f"**Technical details:** `{str(inner_e)}`"
+                
+                await progress_msg.edit_text(error_msg)
             
     except Exception as e:
-        logger.error(f"Error fetching message for user {user_id}: {e}")
+        logger.error(f"Error in handle_message_with_link for user {user_id}: {e}")
         
-        await progress_msg.edit_text(
-            f"❌ **Failed to fetch message**\n\n"
-            f"**Possible reasons:**\n"
-            f"• Message not found or deleted\n"
-            f"• No access to the channel/chat\n"
-            f"• Invalid link format\n"
-            f"• Network connectivity issues\n\n"
-            f"**Error details:** `{str(e)}`"
-        )
+        try:
+            await progress_msg.edit_text(
+                f"❌ **Error processing link**\n\n"
+                f"**Error:** `{str(e)}`\n\n"
+                "Please check the link format and try again."
+            )
+        except:
+            # If progress message was already deleted or modified
+            await update.message.reply_text(
+                f"❌ **Error processing link**\n\n"
+                f"**Error:** `{str(e)}`\n\n"
+                "Please check the link format and try again."
+            )
 
 # --- Web Server for Health Checks (Koyeb Compatible) ---
 

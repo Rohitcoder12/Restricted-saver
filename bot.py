@@ -269,6 +269,7 @@ async def get_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔐 **2FA Protection Detected**\n\n"
             "Your account has Two-Factor Authentication enabled.\n"
             "Please send me your 2FA password to complete login.\n\n"
+            "🔒 **Security Tip:** You can send as `aa<password>` for extra privacy\n\n"
             "🔒 Your password is secure and won't be stored."
         )
         return GET_2FA

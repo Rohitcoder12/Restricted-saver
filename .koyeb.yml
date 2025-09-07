@@ -1,0 +1,16 @@
+name: telegram-downloader-bot
+services:
+  - name: telegram-bot
+    type: web
+    build:
+      buildpack: python
+    instance_type: nano
+    env:
+      - name: PYTHON_VERSION
+        value: "3.11.9"
+    health_check:
+      http:
+        path: /health
+        port: 8000
+    autoscaling:
+      min:

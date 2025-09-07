@@ -736,6 +736,7 @@ def main():
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler('logout', logout_command))
     application.add_handler(CommandHandler('status', status_command))
+    application.add_handler(CommandHandler('test', test_access_command))
     application.add_handler(MessageHandler(
         filters.TEXT & filters.Entity("url") & ~filters.COMMAND,
         handle_message_with_link

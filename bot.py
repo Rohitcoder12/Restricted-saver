@@ -720,313 +720,52 @@ async def handle_message_with_link(update: Update, context: ContextTypes.DEFAULT
                 await progress_msg.edit_text("⏳ Checking channel access...")
                 
                 # First, try to get the message directly
+                message = await user_client.get_messages(chat_id, msg_id)
+                if not message:
+                    raise Exception("Message not found")
+                
+                await progress_msg.edit_text("⏳ Downloading message...")
+                
+                # Try different methods to get the content
+                success = False
+                
+                # Method 1: Try copying the message
                 try:
-                    message = await user_client.get_messages(chat_id, msg_id)
-                    if not message:
-                        raise Exception("Message not found")
-                    
-                    await progress_msg.edit_text("⏳ Downloading message...")
-                    
-                    # Try different methods to get the content
-                    success = False
-                    
-                    # Method 1: Try copying the message
+                    await user_client.copy_message(
+                        chat_id=update.effective_chat.id,
+                        from_chat_id=chat_id,
+                        message_id=msg_id
+                    )
+                    success = True
+                except Exception as copy_error:
+                    logger.info(f"Copy method failed: {copy_error}")
+                
+                # Method 2: If copy fails, try forwarding
+                if not success:
                     try:
-                        await user_client.copy_message(
+                        await user_client.forward_messages(
                             chat_id=update.effective_chat.id,
                             from_chat_id=chat_id,
-                            message_id=msg_id
+                            message_ids=msg_id
                         )
                         success = True
-                    except Exception as copy_error:
-                        logger.info(f"Copy method failed: {copy_error}")
-                    
-                    # Method 2: If copy fails, try forwarding
-                    if not success:
-                        try:
-                            await user_client.forward_messages(
-                                chat_id=update.effective_chat.id,
-                                from_chat_id=chat_id,
-                                message_ids=msg_id
-                            )
-                            success = True
-                        except Exception as forward_error:
-                            logger.info(f"Forward method failed: {forward_error}")
-                    
-                    # Method 3: If both fail, download media directly
-                    if not success and message.media:
-                        try:
-                            await progress_msg.edit_text("⏳ Downloading media...")
-                            
-                            # Download the media file
-                            file_path = await user_client.download_media(message)
-                            
-                            if file_path:
-                                # Send the downloaded file
-                                with open(file_path, 'rb') as file:
-                                    if message.photo:
-                                        await context.bot.send_photo(
-                                            chat_id=update.effective_chat.id,
-                                            photo=file,
-                                            caption=message.caption or "Downloaded from private channel"
-                                        )
-                                    elif message.video:
-                                        await context.bot.send_video(
-                                            chat_id=update.effective_chat.id,
-                                            video=file,
-                                            caption=message.caption or "Downloaded from private channel"
-                                        )
-                                    elif message.document:
-                                        await context.bot.send_document(
-                                            chat_id=update.effective_chat.id,
-                                            document=file,
-                                            caption=message.caption or "Downloaded from private channel"
-                                        )
-                                    else:
-                                        await context.bot.send_document(
-                                            chat_id=update.effective_chat.id,
-                                            document=file,
-                                            caption=message.caption or "Downloaded from private channel"
-                                        )
-                                
-                                # Clean up the downloaded file
-                                import os
-                                if os.path.exists(file_path):
-                                    os.remove(file_path)
-                                    
-                                success = True
-                        except Exception as download_error:
-                            logger.info(f"Download method failed: {download_error}")
-                    
-                    # Method 4: If all else fails, send text content
-                    if not success and message.text:
-                        await context.bot.send_message(
-                            chat_id=update.effective_chat.id,
-                            text=f"📝 **Message from private channel:**\n\n{message.text}",
-                            parse_mode='Markdown'
-                        )
-                        success = True
-                    
-                    if success:
-                        # Delete progress message and log success
-                        await progress_msg.delete()
-                        
-                        # Log successful download
-                        log_message = (
-                            f"📥 **#Download**\n\n"
-                            f"👤 **User:** {update.effective_user.full_name}\n"
-                            f"🆔 **User ID:** `{user_id}`\n"
-                            f"🔗 **Link:** `{message_text}`\n"
-                            f"💬 **Chat ID:** `{chat_id}`\n"
-                            f"📨 **Message ID:** `{msg_id}`\n"
-                            f"⏰ **Time:** {update.message.date}\n"
-                            f"🔄 **Method:** Enhanced Download"
-                        )
-                        
-                        await context.bot.send_message(
-                            chat_id=LOG_CHANNEL_ID,
-                            text=log_message,
-                            parse_mode='Markdown'
-                        )
-                    else:
-                        raise Exception("All download methods failed")
-                        
-                except Exception as message_error:
-                    # Try to get more information about the chat
-                    chat_info = None
+                    except Exception as forward_error:
+                        logger.info(f"Forward method failed: {forward_error}")
+                
+                # Method 3: If both fail, download media directly
+                if not success and message.media:
                     try:
-                        chat_info = await user_client.get_chat(chat_id)
-                    except:
-                        pass
-                    
-                    error_msg = "❌ **Failed to fetch message**\n\n"
-                    
-                    if "peer id invalid" in str(message_error).lower() or "invalid" in str(message_error).lower():
-                        if chat_info:
-                            error_msg += (
-                                f"**Channel:** {chat_info.title}\n"
-                                f"**Type:** {chat_info.type}\n\n"
-                                "**Possible reasons:**\n"
-                                "• This is a private channel that requires an invitation\n"
-                                "• You may have been removed from the channel\n"
-                                "• Channel access permissions have changed\n"
-                                "• Bot cannot access this specific message\n\n"
-                                "**Solutions:**\n"
-                                "• Make sure you're still a member of this channel\n"
-                                "• Try accessing the channel directly first\n"
-                                "• Ask the channel admin about access permissions\n"
-                            )
-                        else:
-                            error_msg += (
-                                "**Reason:** Cannot access this channel/chat\n\n"
-                                "**This usually happens when:**\n"
-                                "• You're not a member of this private channel\n"
-                                "• The channel doesn't exist or was deleted\n"
-                                "• You were removed from the channel\n"
-                                "• The channel requires special permissions\n\n"
-                                "**Solutions:**\n"
-                                "• Join the channel first, then try again\n"
-                                "• Check if you have access to the channel in Telegram\n"
-                                "• Ask for an invitation if it's private\n"
-                            )
-                    elif "message not found" in str(message_error).lower():
-                        error_msg += (
-                            "**Reason:** Message not found\n\n"
-                            "**Possible causes:**\n"
-                            "• Message was deleted by the sender or admin\n"
-                            "• Wrong message ID in the link\n"
-                            "• Message is restricted or hidden\n\n"
-                            "**Solutions:**\n"
-                            "• Check if the message still exists in the channel\n"
-                            "• Try a different message from the same channel\n"
-                            "• Verify the link is correct and complete\n"
-                        )
-                    elif "flood" in str(message_error).lower():
-                        error_msg += (
-                            "**Reason:** Rate limit exceeded\n\n"
-                            "**Solution:** Wait 2-5 minutes before trying again\n"
-                            "Too many requests in a short time period.\n"
-                        )
-                    elif "forbidden" in str(message_error).lower() or "restricted" in str(message_error).lower():
-                        error_msg += (
-                            "**Reason:** Access restricted\n\n"
-                            "**Possible causes:**\n"
-                            "• Channel has disabled message forwarding/copying\n"
-                            "• Your account is restricted in this channel\n"
-                            "• Channel has content protection enabled\n\n"
-                            "**Solutions:**\n"
-                            "• Contact the channel admin\n"
-                            "• Check your permissions in the channel\n"
-                            "• Try accessing the message directly in Telegram\n"
-                        )
-                    else:
-                        error_msg += (
-                            "**Possible reasons:**\n"
-                            "• Channel access restrictions\n"
-                            "• Network connectivity issues\n"
-                            "• Temporary Telegram server issues\n"
-                            "• Message or channel protection settings\n\n"
-                            "**Try:**\n"
-                            "• Wait a few minutes and try again\n"
-                            "• Check if you can access the message in Telegram app\n"
-                            "• Make sure you're connected to the internet\n"
-                        )
-                    
-                    error_msg += f"\n**Technical details:** `{str(message_error)}`"
-                    
-                    await progress_msg.edit_text(error_msg)
-            
-    except Exception as e:
-        logger.error(f"Error in enhanced handle_message_with_link for user {user_id}: {e}")
-        
-        try:
-            await progress_msg.edit_text(
-                f"❌ **Unexpected error occurred**\n\n"
-                f"**Error:** `{str(e)}`\n\n"
-                "**What to try:**\n"
-                "• Check your internet connection\n"
-                "• Wait a few minutes and try again\n"
-                "• Make sure the link is valid\n"
-                "• Contact support if the issue persists\n\n"
-                "**Technical details:** The bot encountered an unexpected error while processing your request."
-            )
-        except:
-            # If progress message was already deleted or modified
-            await update.message.reply_text(
-                f"❌ **Error processing link**\n\n"
-                f"**Error:** `{str(e)}`\n\n"
-                "Please check the link format and try again."
-            )
-
-# --- Web Server for Health Checks (Koyeb Compatible) ---
-
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return {
-        "status": "alive",
-        "bot": "Telegram Downloader Bot",
-        "active_sessions": len(user_sessions),
-        "platform": "Koyeb"
-    }
-
-@app.route('/health')
-def health():
-    return {
-        "status": "healthy",
-        "database": "connected" if db_client else "disconnected",
-        "sessions": len(user_sessions)
-    }
-
-@app.route('/stats')
-def stats():
-    return {
-        "total_users": len(user_sessions),
-        "database_status": "connected" if db_client else "disconnected",
-        "bot_status": "running"
-    }
-
-def run_flask():
-    port = int(os.environ.get('PORT', 8000))  # Koyeb typically uses 8000
-    app.run(host='0.0.0.0', port=port, debug=False)
-
-# --- Main Application ---
-
-def main():
-    # Validate environment variables
-    missing_vars = []
-    if not API_ID: missing_vars.append("API_ID")
-    if not API_HASH: missing_vars.append("API_HASH") 
-    if not BOT_TOKEN: missing_vars.append("BOT_TOKEN")
-    if not LOG_CHANNEL_ID: missing_vars.append("LOG_CHANNEL_ID")
-    if not MONGO_URI: missing_vars.append("MONGO_URI")
-    
-    if missing_vars:
-        logger.error(f"CRITICAL: Missing environment variables: {', '.join(missing_vars)}")
-        return
-        
-    if not db_client:
-        logger.error("CRITICAL: Bot cannot start without database connection.")
-        return
-
-    logger.info("Starting Telegram Downloader Bot...")
-    logger.info(f"Loaded {len(user_sessions)} existing user sessions")
-
-    # Create application
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    # Conversation handler for login process
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start_command)],
-        states={
-            GET_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone_number)],
-            GET_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_otp)],
-            GET_2FA: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_2fa_password)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel_command)],
-        conversation_timeout=300  # 5 minutes timeout
-    )
-
-    # Add handlers
-    application.add_handler(conv_handler)
-    application.add_handler(CommandHandler('logout', logout_command))
-    application.add_handler(CommandHandler('status', status_command))
-    application.add_handler(CommandHandler('check', check_access_command))
-    application.add_handler(CommandHandler('channels', my_channels_command))
-    application.add_handler(MessageHandler(
-        filters.TEXT & filters.Entity("url") & ~filters.COMMAND,
-        handle_message_with_link
-    ))
-
-    # Start Flask server in background
-    flask_thread = Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-
-    logger.info("Bot started successfully! Waiting for messages...")
-    
-    # Start bot
-    application.run_polling(drop_pending_updates=True)
-
-if __name__ == "__main__":
-    main()
+                        await progress_msg.edit_text("⏳ Downloading media...")
+                        
+                        # Download the media file
+                        file_path = await user_client.download_media(message)
+                        
+                        if file_path:
+                            # Send the downloaded file
+                            with open(file_path, 'rb') as file:
+                                if message.photo:
+                                    await context.bot.send_photo(
+                                        chat_id=update.effective_chat.id,
+                                        photo=file,
+                                        caption=message.caption or "Downloaded from private channel"
+                                    )

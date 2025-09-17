@@ -1,6 +1,9 @@
 # --- Enhanced bot.py with Fixed Login System and Improved Download Features ---
 
 import os
+from dotenv import load_dotenv
+
+load_dotenv() # This line loads the variables from .env
 import logging
 from threading import Thread
 from typing import Dict, Any
